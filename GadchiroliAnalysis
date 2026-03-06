@@ -1,0 +1,176 @@
+// FOREST FIRE ANALYSIS - GADCHIROLI DISTRICT, 
+
+var IndiaDist = ee.FeatureCollection("projects/ee-project-tapas/assets/IndiaDistrict");
+var IndiaSubDist = ee.FeatureCollection("projects/ee-project-tapas/assets/IndiaSubDist");
+
+// Load and filter the district boundary
+var selectedDistrict = IndiaDist.filter(ee.Filter.eq('District', 'Gadchiroli'));
+var selectedDistrict = IndiaSubDist.filter(ee.Filter.eq('District', 'Gadchiroli'));
+var districtGeometry = selectedDistrict.geometry();
+
+Map.centerObject(selectedDistrict, 9);
+Map.addLayer(selectedDistrict, {color: 'black', fillColor: '00000000', width: 2}, 'Gadchiroli Boundary');
+
+// :: Date Range ::
+var startDate = ee.Date('2020-01-01');
+var endDate   = startDate.advance(2, 'year');   // 2 years from start
+
+
+ 
+// 1. LOAD & CLIP FIRMS FIRE DATA
+ 
+var dataset = ee.ImageCollection('FIRMS')
+  .filter(ee.Filter.date(startDate, endDate))
+  .filterBounds(districtGeometry);
+
+// Use T21 (brightness temperature) to detect active fires
+var fires = dataset.select('T21');
+
+// Clip each image to the district boundary
+var firesClipped = fires.map(function(img) {
+  return img.clip(districtGeometry);
+});
+
+ 
+// 2. FIRE FREQUENCY MAP
+// (How many times each pixel caught fire)
+ 
+var fireThreshold = 325; // Kelvin — minimum temp to count as fire
+
+var fireMask = firesClipped.map(function(img) {
+  return img.gt(fireThreshold).selfMask();
+});
+
+var fireFrequency = fireMask.sum().clip(districtGeometry);
+
+var freqVis = {
+  min: 1,
+  max: 10,
+  palette: ['yellow', 'orange', 'red', 'darkred'],
+};
+Map.addLayer(fireFrequency, freqVis, 'Fire Frequency (2020-2021)');
+
+ 
+// 3. MAX FIRE INTENSITY MAP
+ 
+var maxIntensity = firesClipped.max().clip(districtGeometry);
+
+var intensityVis = {
+  min: 325,
+  max: 420,
+  palette: ['lightyellow', 'orange', 'red', 'purple'],
+};
+Map.addLayer(maxIntensity, intensityVis, 'Max Fire Intensity (T21)');
+
+ 
+// 4. FIRE HOTSPOTS — Vector Points
+ 
+var maxFireImage = firesClipped.max().clip(districtGeometry);
+
+var hotspots = maxFireImage.gt(fireThreshold)
+  .selfMask()
+  .reduceToVectors({
+    geometry: districtGeometry,
+    scale: 1000,
+    geometryType: 'centroid',
+    eightConnected: false,
+    maxPixels: 1e10
+  });
+
+Map.addLayer(hotspots, {color: 'red'}, 'Fire Hotspots');
+
+ 
+// 5. MONTHLY FIRE COUNT (Time Series)
+ 
+var months = ee.List.sequence(1, 12);
+var year = 2021;     // Change for fetching plot for different year
+
+var monthlyFireCount = months.map(function(m) {
+  m = ee.Number(m);
+  var start = ee.Date.fromYMD(year, m, 1);
+  var end = start.advance(1, 'month');
+
+  var monthFires = firesClipped
+    .filter(ee.Filter.date(start, end))
+    .map(function(img) { return img.gt(fireThreshold); })
+    .sum()
+    .clip(districtGeometry);
+
+  var fireCount = monthFires.reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: districtGeometry,
+    scale: 1000,
+    maxPixels: 1e10
+  });
+
+  return ee.Feature(null, {
+    'month': m,
+    'fire_pixels': fireCount.get('T21')
+  });
+});
+
+var monthlyFC = ee.FeatureCollection(monthlyFireCount);
+print('Monthly Fire Pixel Count (' + year + '):', monthlyFC);
+
+// Chart — Monthly Fire Trend
+var chart = ui.Chart.feature.byFeature(monthlyFC, 'month', 'fire_pixels')
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Monthly Forest Fire Incidents — Gadchiroli (' + year + ')',
+    hAxis: {
+      title: 'Month',
+      ticks: [
+        {v:1,f:'Jan'},{v:2,f:'Feb'},{v:3,f:'Mar'},
+        {v:4,f:'Apr'},{v:5,f:'May'},{v:6,f:'Jun'},
+        {v:7,f:'Jul'},{v:8,f:'Aug'},{v:9,f:'Sep'},
+        {v:10,f:'Oct'},{v:11,f:'Nov'},{v:12,f:'Dec'}
+      ]
+    },
+    vAxis: { title: 'Fire Pixels Count' },
+    colors: ['#e34a33'],
+    legend: { position: 'none' }
+  });
+print(chart);
+
+ 
+// 6. OVERALL FIRE STATS FOR THE DISTRICT
+ 
+var totalFirePixels = fireFrequency.gt(0).reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: districtGeometry,
+  scale: 1000,
+  maxPixels: 1e10
+});
+print('Total Burned Pixels (2020-2021):', totalFirePixels);
+
+var maxTemp = maxIntensity.reduceRegion({
+  reducer: ee.Reducer.max(),
+  geometry: districtGeometry,
+  scale: 1000,
+  maxPixels: 1e10
+});
+print('Max Recorded Fire Temperature (K):', maxTemp);
+
+ 
+// 7. LEGEND
+ 
+var legend = ui.Panel({style: {position: 'bottom-left', padding: '8px'}});
+legend.add(ui.Label('Fire Frequency', {fontWeight: 'bold', fontSize: '14px'}));
+
+var palette = ['yellow', 'orange', 'red', 'darkred'];
+var labels  = ['Low (1)', 'Medium', 'High', 'Very High (10+)'];
+
+palette.forEach(function(color, i) {
+  var row = ui.Panel([
+    ui.Label('', {backgroundColor: color, padding: '8px', margin: '2px'}),
+    ui.Label(labels[i], {margin: '4px'})
+  ], ui.Panel.Layout.flow('horizontal'));
+  legend.add(row);
+});
+
+Map.add(legend);
+
+
+
+// Som, IIRS, 2023 
+// Som, RuDRA Lab, 6-3-26 (modified)
